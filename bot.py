@@ -1,4 +1,5 @@
 import os
+import json
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -10,27 +11,82 @@ from threading import Thread
 from firebase_admin import credentials, firestore
 import firebase_admin
 
-
-
 Token = '5873483525:AAFBY74pem2W2iGONEhpEz6yN09vCmqqy0Q'
-# db = firestore.client()
-cred_dict = {
-    "type": os.environ["FIREBASE_TYPE"],
-    "project_id": os.environ["FIREBASE_PROJECT_ID"],
-    "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID", ""),
-    "private_key": os.environ["FIREBASE_PRIVATE_KEY"].replace("\\n", "\n"),
-    "client_email": os.environ["FIREBASE_CLIENT_EMAIL"],
-    "client_id": os.environ.get("FIREBASE_CLIENT_ID", ""),
-    "auth_uri": os.environ.get("FIREBASE_AUTH_URI", ""),
-    "token_uri": os.environ.get("FIREBASE_TOKEN_URI", ""),
-    "auth_provider_x509_cert_url": os.environ.get("FIREBASE_AUTH_PROVIDER_CERT_URL", ""),
-    "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_CERT_URL", "")
-}
 
-cred = credentials.Certificate(cred_dict)
-firebase_admin.initialize_app(cred)
+# Method 1: Try loading from JSON string (recommended for deployment)
+def initialize_firebase():
+    try:
+        # First, try to load from a complete JSON string
+        firebase_config_json = os.environ.get('FIREBASE_CONFIG_JSON')
+        if firebase_config_json:
+            try:
+                cred_dict = json.loads(firebase_config_json)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred)
+                print("✅ Firebase initialized from JSON string")
+                return firestore.client()
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON decode error: {e}")
+            except Exception as e:
+                print(f"❌ Firebase init error from JSON: {e}")
+        
+        # Method 2: Try the original method with better private key handling
+        private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+        
+        # Clean up the private key - handle different formats
+        if private_key:
+            # Remove any quotes that might be wrapping the key
+            private_key = private_key.strip('"').strip("'")
+            
+            # Replace literal \n with actual newlines
+            private_key = private_key.replace('\\n', '\n')
+            
+            # Ensure proper PEM format
+            if not private_key.startswith('-----BEGIN'):
+                print("❌ Private key doesn't start with proper PEM header")
+                return None
+            
+            if not private_key.endswith('-----\n') and not private_key.endswith('-----'):
+                private_key += '\n'
 
-db = firestore.client()
+        cred_dict = {
+            "type": os.environ.get("FIREBASE_TYPE", "service_account"),
+            "project_id": os.environ.get("FIREBASE_PROJECT_ID", ""),
+            "private_key_id": os.environ.get("FIREBASE_PRIVATE_KEY_ID", ""),
+            "private_key": private_key,
+            "client_email": os.environ.get("FIREBASE_CLIENT_EMAIL", ""),
+            "client_id": os.environ.get("FIREBASE_CLIENT_ID", ""),
+            "auth_uri": os.environ.get("FIREBASE_AUTH_URI", "https://accounts.google.com/o/oauth2/auth"),
+            "token_uri": os.environ.get("FIREBASE_TOKEN_URI", "https://oauth2.googleapis.com/token"),
+            "auth_provider_x509_cert_url": os.environ.get("FIREBASE_AUTH_PROVIDER_CERT_URL", "https://www.googleapis.com/oauth2/v1/certs"),
+            "client_x509_cert_url": os.environ.get("FIREBASE_CLIENT_CERT_URL", "")
+        }
+        
+        # Validate required fields
+        required_fields = ["type", "project_id", "private_key", "client_email"]
+        missing_fields = [field for field in required_fields if not cred_dict.get(field)]
+        
+        if missing_fields:
+            print(f"❌ Missing required Firebase config fields: {missing_fields}")
+            return None
+        
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        print("✅ Firebase initialized from individual env vars")
+        return firestore.client()
+        
+    except Exception as e:
+        print(f"❌ Firebase initialization failed: {e}")
+        print("Please check your Firebase configuration")
+        return None
+
+# Initialize Firebase
+db = initialize_firebase()
+
+if not db:
+    print("❌ Failed to initialize Firebase. Bot will not work properly.")
+    exit(1)
+
 app_web = Flask(__name__)
 
 @app_web.route('/')
@@ -133,10 +189,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     chat_type = update.message.chat.type  # 'private', 'group', 'supergroup', 'channel'
 
-    if chat_type == 'private' and  chat_type != 'channel':
-      
-
-    # Handle store message
+    if chat_type == 'private':
+        # Handle store message
         if user_id in user_data and user_data[user_id].get("awaiting_store_mssg"):
             text_to_store = update.message.text.strip()
             success, error = await store_message_for_user(user_id, text_to_store)
@@ -233,9 +287,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please click a button first to start an action.")
 
 # Command to show scheduled messages
-
-
-
 async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text):
     channel_username = "@testttmmml"  # Replace with your channel username
 
@@ -247,7 +298,6 @@ async def send_to_channel(update: Update, context: ContextTypes.DEFAULT_TYPE, me
 
 # Check if bot is in the channel
 async def check_channel_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
     channel_username = update.message.text.strip()  # e.g., "@testttmmml"
     try:
         bot_member = await context.bot.get_chat_member(channel_username, context.bot.id)
@@ -258,6 +308,7 @@ async def check_channel_membership(update: Update, context: ContextTypes.DEFAULT
             await update.message.reply_text(f"❌ I am NOT in the channel {channel_username}. Status: {status}")
     except Exception as e:
         await update.message.reply_text(f"❌ Cannot access {channel_username}. Make sure the bot is added to the channel.\nError: {e}")
+
 async def send_scheduled_message(bot, user_id, message_text):
     try:
         docs = db.collection("users").stream()
@@ -297,10 +348,6 @@ async def check_channel_admin_with_send_permission(update, context, channel_user
             return False
     except Exception:
         return False
-    
-    
-from datetime import datetime
-from google.cloud import firestore
 
 def normalize_channel_name(name: str) -> str:
     """
@@ -388,9 +435,6 @@ async def store_message_for_user(user_id: int, message: str):
     except Exception as e:
         return False, str(e)
 
-
-from firebase_admin import firestore
-
 async def send_stored_messages(update, context, user_id):
     """
     Send all stored messages of the user to their channels.
@@ -437,6 +481,7 @@ async def send_stored_messages(update, context, user_id):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error sending messages: {e}")
+
 async def show_scheduled(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     try:
