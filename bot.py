@@ -13,41 +13,86 @@ import firebase_admin
 
 Token = '5873483525:AAFBY74pem2W2iGONEhpEz6yN09vCmqqy0Q'
 
-# Method 1: Try loading from JSON string (recommended for deployment)
+def clean_private_key(key_str):
+    """Clean and validate private key format"""
+    if not key_str:
+        return None
+    
+    # Remove quotes and extra whitespace
+    key_str = key_str.strip().strip('"').strip("'")
+    
+    # Handle different newline representations
+    key_str = key_str.replace('\\n', '\n')
+    key_str = key_str.replace('\\r\\n', '\n')
+    key_str = key_str.replace('\r\n', '\n')
+    key_str = key_str.replace('\r', '\n')
+    
+    # Remove any non-printable characters and extra spaces
+    import re
+    # Keep only printable ASCII characters, newlines, and dashes
+    key_str = re.sub(r'[^\x20-\x7E\n]', '', key_str)
+    
+    # Ensure proper PEM structure
+    lines = key_str.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line:  # Skip empty lines
+            cleaned_lines.append(line)
+    
+    # Reconstruct with proper formatting
+    if cleaned_lines and cleaned_lines[0].startswith('-----BEGIN'):
+        key_str = '\n'.join(cleaned_lines) + '\n'
+    else:
+        print(f"❌ Invalid private key format. Should start with '-----BEGIN PRIVATE KEY-----'")
+        return None
+    
+    return key_str
+
 def initialize_firebase():
     try:
-        # First, try to load from a complete JSON string
+        # Method 1: Try loading from complete JSON string (recommended)
         firebase_config_json = os.environ.get('FIREBASE_CONFIG_JSON')
         if firebase_config_json:
             try:
+                # Clean the JSON string first
+                firebase_config_json = firebase_config_json.strip().strip('"').strip("'")
                 cred_dict = json.loads(firebase_config_json)
+                
+                # Clean the private key within the JSON
+                if 'private_key' in cred_dict:
+                    cred_dict['private_key'] = clean_private_key(cred_dict['private_key'])
+                    if not cred_dict['private_key']:
+                        raise ValueError("Invalid private key in JSON config")
+                
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred)
                 print("✅ Firebase initialized from JSON string")
                 return firestore.client()
+                
             except json.JSONDecodeError as e:
                 print(f"❌ JSON decode error: {e}")
+                print("First 100 chars of JSON:", firebase_config_json[:100])
             except Exception as e:
                 print(f"❌ Firebase init error from JSON: {e}")
         
-        # Method 2: Try the original method with better private key handling
-        private_key = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+        # Method 2: Try loading from individual environment variables
+        print("Trying individual environment variables...")
         
-        # Clean up the private key - handle different formats
-        if private_key:
-            # Remove any quotes that might be wrapping the key
-            private_key = private_key.strip('"').strip("'")
-            
-            # Replace literal \n with actual newlines
-            private_key = private_key.replace('\\n', '\n')
-            
-            # Ensure proper PEM format
-            if not private_key.startswith('-----BEGIN'):
-                print("❌ Private key doesn't start with proper PEM header")
-                return None
-            
-            if not private_key.endswith('-----\n') and not private_key.endswith('-----'):
-                private_key += '\n'
+        # Get and clean the private key
+        private_key_raw = os.environ.get("FIREBASE_PRIVATE_KEY", "")
+        private_key = clean_private_key(private_key_raw)
+        
+        if not private_key:
+            print("❌ Failed to clean/validate private key")
+            return None
+        
+        # Debug: Show key structure (without revealing the actual key)
+        key_lines = private_key.split('\n')
+        print(f"Private key structure: {len(key_lines)} lines")
+        print(f"First line: {key_lines[0] if key_lines else 'None'}")
+        print(f"Last non-empty line: {[line for line in key_lines if line.strip()][-1] if key_lines else 'None'}")
 
         cred_dict = {
             "type": os.environ.get("FIREBASE_TYPE", "service_account"),
@@ -70,6 +115,16 @@ def initialize_firebase():
             print(f"❌ Missing required Firebase config fields: {missing_fields}")
             return None
         
+        # Validate project_id and client_email format
+        if not cred_dict["project_id"] or not cred_dict["client_email"]:
+            print("❌ project_id or client_email is empty")
+            return None
+            
+        if "@" not in cred_dict["client_email"]:
+            print("❌ client_email doesn't look like an email address")
+            return None
+        
+        print("All validation passed, trying to initialize Firebase...")
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
         print("✅ Firebase initialized from individual env vars")
@@ -77,7 +132,17 @@ def initialize_firebase():
         
     except Exception as e:
         print(f"❌ Firebase initialization failed: {e}")
-        print("Please check your Firebase configuration")
+        print(f"Error type: {type(e).__name__}")
+        
+        # Try to provide more specific error info
+        if "Unable to load PEM file" in str(e):
+            print("🔍 Private key PEM format issue detected.")
+            print("Please ensure your private key:")
+            print("1. Starts with '-----BEGIN PRIVATE KEY-----'")
+            print("2. Ends with '-----END PRIVATE KEY-----'")
+            print("3. Has proper line breaks (\\n)")
+            print("4. Contains only valid base64 characters between headers")
+            
         return None
 
 # Initialize Firebase
