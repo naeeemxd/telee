@@ -1,0 +1,6 @@
+Flask
+python-telegram-bot==20.4
+apscheduler
+firebase-admin==6.1.0
+google-cloud-firestore
+asyncio
